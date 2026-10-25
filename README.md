@@ -63,3 +63,7 @@
 **CurseForge 搜不到东西**：镜像搜索为模糊匹配，可用简称（如 `atm9 sky`、`jei`）；也可直接粘贴项目 id。
 
 **安装 Forge/NeoForge 失败**：查看日志中的「处理步骤」，通常是某个 Maven 依赖下载失败，重试即可（已自带阿里云 Maven 回退）。
+
+##
+
+**LLM deepseek-v4.1-flash programmed**
