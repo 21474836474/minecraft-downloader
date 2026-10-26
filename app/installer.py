@@ -1,6 +1,7 @@
 """高层安装流程：游戏实例、模组、整合包、光影、材质、数据包。
 
 内容提供方（prov）可以是 Modrinth 或 CurseForge，两者接口已对齐。
+安装模组时按 jar 内 modId 做"已有模组"拦截（replace / skip）。
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
-from . import config, loaders
+from . import config, loaders, mods as mods_util
 from .mojang import Mojang
 from .net import Downloader
 
@@ -24,12 +25,50 @@ KIND_LABEL = {
     "datapack": "数据包",
 }
 
-LOADER_BY_KEY = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge"}
+LOADER_BY_KEY = dict(fabric="Fabric", forge="Forge", neoforge="NeoForge")
 
 
 def _mr_loader(loader: str) -> str:
     return {"Fabric": "fabric", "Forge": "forge", "NeoForge": "neoforge",
             "Quilt": "quilt"}.get(loader, "")
+
+
+def _policy(on_conflict: Optional[str]) -> str:
+    if on_conflict in ("replace", "skip"):
+        return on_conflict
+    try:
+        return config.load_config().get("on_conflict") or "replace"
+    except Exception:  # noqa: BLE001
+        return "replace"
+
+
+def _stage_dir(target: str) -> str:
+    d = os.path.join(target, ".mcdl-staging")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _same_file(path: str, sha1: str = "", size: Optional[int] = None) -> bool:
+    if not os.path.exists(path):
+        return False
+    try:
+        if size is not None and os.path.getsize(path) != size:
+            return False
+        if sha1:
+            return mods_util_hash(path) == sha1.lower()
+        return True
+    except OSError:
+        return False
+
+
+def mods_util_hash(path: str) -> str:
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
 
 
 # ---------------- 游戏本体 ----------------
@@ -100,34 +139,22 @@ def ensure_game_and_loader(dl: Downloader, mj: Mojang, inst_path: str, mc: str,
 
 
 # ---------------- 内容安装 ----------------
-def _download_version_file(dl: Downloader, prov, ver: dict, target_dir: str,
-                           log: Callable[[str], None]) -> Optional[str]:
-    f = prov.version_file(ver)
-    if not f:
-        log("  该版本没有可下载文件，跳过")
-        return None
-    os.makedirs(target_dir, exist_ok=True)
-    dest = os.path.join(target_dir, f["filename"])
-    src = f.get("urls") or f.get("url")
-    dl.download(src, dest, (f.get("hashes") or {}).get("sha1"), f.get("size"), f["filename"])
-    return dest
-
-
 def install_content(dl: Downloader, prov, inst_path: str, kind: str, project_id: str,
                     version_id: str = "", with_deps: bool = True, world: str = "",
-                    log: Callable[[str], None] = print) -> list[str]:
-    """安装模组/光影/材质/数据包，自动补齐必需前置。"""
+                    log: Callable[[str], None] = print,
+                    on_conflict: Optional[str] = None) -> list[str]:
+    """安装模组/光影/材质/数据包，自动补齐必需前置，并对已有同款做拦截。"""
     inst = config.load_instance(inst_path)
     mc = inst.mc_version if inst else ""
     loader = _mr_loader(inst.loader if inst else "")
     label = KIND_LABEL.get(kind, kind)
-    target = config.pick_target_dir(inst_path, kind, world)
-    log(f"=== 安装{label} [{target}] ===")
+    policy = _policy(on_conflict)
+    log(f"=== 安装{label}（冲突策略：{'替换' if policy == 'replace' else '跳过'}） ===")
 
-    installed: list[str] = []
+    plan: list[dict] = []
     seen: set[str] = set()
 
-    def do_one(pid: str, vid: str, depth: int = 0, forced_kind: str = ""):
+    def collect(pid: str, vid: str, depth: int = 0, forced_kind: str = ""):
         if pid in seen:
             return
         seen.add(pid)
@@ -138,17 +165,26 @@ def install_content(dl: Downloader, prov, inst_path: str, kind: str, project_id:
         title = proj.get("title") or pid
         this_kind = forced_kind or proj.get("project_type") or kind
         this_kind = {"modpack": "mod"}.get(this_kind, this_kind)
-        this_target = config.pick_target_dir(inst_path, this_kind,
-                                             world if this_kind == kind else "")
         ver = prov.version(vid, pid) if vid else prov.best_version(pid, mc, loader)
         if not ver:
             log(f"  {title}: 找不到适配 {mc}/{loader} 的版本")
             return
+        f = prov.version_file(ver)
+        if not f:
+            log(f"  {title}: 该版本没有可下载文件")
+            return
+        target = config.pick_target_dir(inst_path, this_kind,
+                                        world if this_kind == kind else "")
         log("  " + "  " * depth + f"{title} {ver.get('version_number')}"
             + ("  [前置]" if depth else ""))
-        path = _download_version_file(dl, prov, ver, this_target, log)
-        if path:
-            installed.append(os.path.basename(path))
+        plan.append({
+            "kind": this_kind,
+            "target": target,
+            "filename": f["filename"],
+            "url": f.get("urls") or f.get("url"),
+            "sha1": (f.get("hashes") or {}).get("sha1"),
+            "size": f.get("size"),
+        })
         if not with_deps:
             return
         for dep in ver.get("dependencies") or []:
@@ -162,10 +198,41 @@ def install_content(dl: Downloader, prov, inst_path: str, kind: str, project_id:
                 dv = prov.best_version(dpid, mc, loader)
                 dvid = dv["id"] if dv else ""
             if dvid:
-                do_one(dpid, dvid, depth + 1)
+                collect(dpid, dvid, depth + 1)
 
-    do_one(project_id, version_id)
-    log(f"=== {label}安装完成：{len(installed)} 个文件 ===")
+    collect(project_id, version_id)
+
+    # 按目标目录分组 → 暂存 → 冲突拦截 → 落盘
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for it in plan:
+        groups.setdefault((it["target"], it["kind"]), []).append(it)
+
+    installed: list[str] = []
+    all_replaced: list[str] = []
+    all_skipped: list[str] = []
+    for (target, k), items in groups.items():
+        stage = _stage_dir(target)
+        todo = []
+        for it in items:
+            dest = os.path.join(target, it["filename"])
+            if _same_file(dest, it["sha1"] or "", it["size"]):
+                log(f"  已安装（校验一致，跳过下载）：{it['filename']}")
+                all_skipped.append(it["filename"])
+                continue
+            todo.append({"url": it["url"], "dest": os.path.join(stage, it["filename"]),
+                         "sha1": it["sha1"], "size": it["size"],
+                         "label": it["filename"]})
+        if todo:
+            dl.download_many(todo, f"下载{label}")
+        files = [os.path.join(stage, f) for f in os.listdir(stage)] if os.path.isdir(stage) else []
+        got, rep, skip = mods_util.commit_staged(files, target, k, policy, log)
+        installed += got
+        all_replaced += rep
+        all_skipped += skip
+        shutil.rmtree(stage, ignore_errors=True)
+
+    log(f"=== {label}安装完成：新增/更新 {len(installed)} 个，"
+        f"替换旧版本 {len(all_replaced)} 个，跳过 {len(all_skipped)} 个 ===")
     return installed
 
 
@@ -194,15 +261,48 @@ def _loader_from_cf_id(loader_id: str) -> tuple[str, str]:
     return "", ""
 
 
+def _install_pack_files(dl: Downloader, items: list[dict], mods_target: str,
+                        inst_path: str, policy: str,
+                        log: Callable[[str], None]) -> tuple[int, int, int]:
+    """下载整合包文件，mods/ 下的走暂存+冲突拦截，其余直接覆盖。"""
+    others = [it for it in items if it["dest_dir"] != mods_target]
+    jars = [it for it in items if it["dest_dir"] == mods_target]
+    if others:
+        dl.download_many([{"url": it["url"], "dest": os.path.join(it["dest_dir"], it["filename"]),
+                           "sha1": it["sha1"], "size": it["size"], "label": it["filename"]}
+                          for it in others], "整合包其他文件")
+
+    if not jars:
+        return 0, 0, 0
+    stage = _stage_dir(mods_target)
+    todo = []
+    skipped_same = 0
+    for it in jars:
+        dest = os.path.join(mods_target, it["filename"])
+        if _same_file(dest, it["sha1"] or "", it["size"]):
+            skipped_same += 1
+            continue
+        todo.append({"url": it["url"], "dest": os.path.join(stage, it["filename"]),
+                     "sha1": it["sha1"], "size": it["size"], "label": it["filename"]})
+    if todo:
+        dl.download_many(todo, "整合包模组")
+    files = [os.path.join(stage, f) for f in os.listdir(stage)] if os.path.isdir(stage) else []
+    got, rep, skip = mods_util.commit_staged(files, mods_target, "mod", policy, log)
+    shutil.rmtree(stage, ignore_errors=True)
+    return len(got), len(rep), skip + skipped_same
+
+
 def install_modpack(dl: Downloader, mj: Mojang, prov, inst_path: str, version: dict,
                     auto_loader: bool = True,
-                    log: Callable[[str], None] = print) -> dict:
+                    log: Callable[[str], None] = print,
+                    on_conflict: Optional[str] = None) -> dict:
     """把整合包（.mrpack / CurseForge .zip）安装到当前实例目录。"""
     f = prov.version_file(version)
     if not f:
         raise RuntimeError("该整合包版本没有文件")
     name = version.get("name") or f["filename"]
-    log(f"=== 安装整合包：{name} ===")
+    policy = _policy(on_conflict)
+    log(f"=== 安装整合包：{name}（冲突策略：{'替换' if policy == 'replace' else '跳过'}） ===")
     tmpdir = tempfile.mkdtemp(prefix="mcdl-pack-")
     pack = os.path.join(tmpdir, f["filename"])
     src = f.get("urls") or f.get("url")
@@ -212,11 +312,11 @@ def install_modpack(dl: Downloader, mj: Mojang, prov, inst_path: str, version: d
         with zipfile.ZipFile(pack) as z:
             names = set(z.namelist())
             if "modrinth.index.json" in names:
-                info = _install_mrpack(dl, mj, prov, inst_path, z, version, auto_loader, log)
+                info = _install_mrpack(dl, mj, prov, inst_path, z, version, auto_loader,
+                                       policy, log)
             elif "manifest.json" in names:
-                info = _install_cf_pack(dl, mj, prov, inst_path, z, auto_loader, log)
-            elif "minecraft" in names or any(n.startswith("mods/") for n in names):
-                # 普通整合 zip：直接解压
+                info = _install_cf_pack(dl, mj, prov, inst_path, z, auto_loader, policy, log)
+            elif any(n.startswith("mods/") for n in names):
                 n = 0
                 for n_ in names:
                     if n_.endswith("/"):
@@ -236,7 +336,8 @@ def install_modpack(dl: Downloader, mj: Mojang, prov, inst_path: str, version: d
     return info
 
 
-def _install_mrpack(dl, mj, prov, inst_path, z: zipfile.ZipFile, version, auto_loader, log) -> dict:
+def _install_mrpack(dl, mj, prov, inst_path, z: zipfile.ZipFile, version, auto_loader,
+                    policy, log) -> dict:
     index = json.loads(z.read("modrinth.index.json"))
     name = index.get("name") or version.get("name") or "modpack"
     deps = index.get("dependencies") or {}
@@ -264,20 +365,23 @@ def _install_mrpack(dl, mj, prov, inst_path, z: zipfile.ZipFile, version, auto_l
         urls = entry.get("downloads") or []
         if not urls:
             continue
+        rel = path.replace("/", os.sep)
         items.append({
             "url": urls[0],
-            "dest": os.path.join(inst_path, path.replace("/", os.sep)),
+            "filename": os.path.basename(rel),
+            "dest_dir": os.path.dirname(os.path.join(inst_path, rel)),
             "sha1": (entry.get("hashes") or {}).get("sha1"),
             "size": entry.get("fileSize"),
-            "label": os.path.basename(path),
         })
-    dl.download_many(items, "整合包内容")
+    got, rep, skip = _install_pack_files(dl, items, os.path.join(inst_path, "mods"),
+                                         inst_path, policy, log)
+    log(f"  模组：新增 {got}，替换旧版本 {rep}，跳过 {skip}")
     n = _extract_dir(z, "overrides/", inst_path) + _extract_dir(z, "client-overrides/", inst_path)
     log(f"  已覆盖配置 {n} 个文件")
-    return {"name": name, "files": len(items), "path": inst_path}
+    return {"name": name, "files": got, "replaced": rep, "skipped": skip, "path": inst_path}
 
 
-def _install_cf_pack(dl, mj, prov, inst_path, z: zipfile.ZipFile, auto_loader, log) -> dict:
+def _install_cf_pack(dl, mj, prov, inst_path, z: zipfile.ZipFile, auto_loader, policy, log) -> dict:
     manifest = json.loads(z.read("manifest.json"))
     mc_info = manifest.get("minecraft") or {}
     mc = mc_info.get("version") or ""
@@ -293,7 +397,6 @@ def _install_cf_pack(dl, mj, prov, inst_path, z: zipfile.ZipFile, auto_loader, l
 
     entries = manifest.get("files") or []
     log(f"  依赖文件 {len(entries)} 个，正在解析下载地址…")
-
     mods_dir = os.path.join(inst_path, "mods")
     os.makedirs(mods_dir, exist_ok=True)
 
@@ -313,13 +416,9 @@ def _install_cf_pack(dl, mj, prov, inst_path, z: zipfile.ZipFile, auto_loader, l
         f = prov.version_file(ver)
         if not f:
             return None
-        return {
-            "url": f.get("urls") or f["url"],
-            "dest": os.path.join(mods_dir, f["filename"]),
-            "sha1": (f.get("hashes") or {}).get("sha1"),
-            "size": f.get("size"),
-            "label": f["filename"],
-        }
+        return {"url": f.get("urls") or f["url"], "filename": f["filename"],
+                "dest_dir": mods_dir,
+                "sha1": (f.get("hashes") or {}).get("sha1"), "size": f.get("size")}
 
     items: list[dict] = []
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -327,7 +426,8 @@ def _install_cf_pack(dl, mj, prov, inst_path, z: zipfile.ZipFile, auto_loader, l
             if it:
                 items.append(it)
     log(f"  可下载 {len(items)}/{len(entries)} 个文件")
-    dl.download_many(items, "整合包模组")
+    got, rep, skip = _install_pack_files(dl, items, mods_dir, inst_path, policy, log)
+    log(f"  模组：新增 {got}，替换旧版本 {rep}，跳过 {skip}")
     n = _extract_dir(z, "overrides/", inst_path) + _extract_dir(z, "client-overrides/", inst_path)
     log(f"  已覆盖配置 {n} 个文件")
-    return {"name": name, "files": len(items), "path": inst_path}
+    return {"name": name, "files": got, "replaced": rep, "skipped": skip, "path": inst_path}

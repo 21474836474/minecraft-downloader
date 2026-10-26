@@ -10,7 +10,7 @@
 | 模块 | 说明 |
 | --- | --- |
 | 游戏实例 | 原版 / Fabric / Forge / NeoForge，自动下载客户端、依赖库、natives、assets、日志配置，并完成加载器安装（内置处理器实现，不依赖官方安装器联网） |
-| 模组 | 搜索、选版本、安装到当前实例 `mods/`，**自动递归补齐必需前置** |
+| 模组 | 搜索、选版本、安装到当前实例 `mods/`，**自动递归补齐必需前置**，**按 modId 拦截已安装的同款模组** |
 | 整合包 | 支持 Modrinth `.mrpack` 与 CurseForge 整合包 zip，直接安装到**当前选中实例文件夹**（mods + overrides/config），实例缺少 MC 本体或加载器时自动补齐 |
 | 光影包 | 安装到 `shaderpacks/` |
 | 材质包 | 安装到 `resourcepacks/` |
@@ -32,6 +32,25 @@
 - **限速**：整数，单位 KB/s，0 = 不限速（全局限速，多线程共享）
 - **下载源**：`镜像加速`（BMCLAPI，国内推荐）/ `官方源`；镜像异常时会自动回退官方
 - **CurseForge Key**：留空走 `mod.mcimirror.top` 镜像（免 Key）；填入官方 Key 则直连官方 API
+- **已有模组处理**：`替换旧版本`（默认）/ `跳过（保留已有）`；单装模组和整合包安装都生效
+
+## 已有模组拦截
+
+安装前扫描 `mods/` 里所有 jar，用 jar 内声明识别模组身份：
+
+- Fabric/Quilt：`fabric.mod.json` / `quilt.mod.json` 的 `id`、`provides`
+- Forge/NeoForge：`META-INF/mods.toml`、`META-INF/neoforge.mods.toml` 的 `modId`
+- 1.12.2 及更早：`mcmod.info` 的 `modid`
+
+命中同一 modId 时：
+
+| 策略 | 行为 |
+| --- | --- |
+| 替换旧版本（默认） | 删掉旧的 jar，放入新 jar，日志 `替换旧版本：a.jar → b.jar` |
+| 跳过 | 保留旧 jar，丢弃新下载的文件（适合"我只想补前置"场景） |
+| 同文件重复装 | 文件名 + SHA1 一致直接跳过，不重复下载 |
+
+整合包安装同样生效：`mods/` 下的文件先落到暂存目录，解析 modId 后再合并，避免覆盖安装时残留两个版本。
 
 ## 目录结构
 

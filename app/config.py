@@ -52,6 +52,7 @@ DEFAULTS = {
     "default_dir": "",
     "source": "modrinth",
     "cf_api_key": "",
+    "on_conflict": "replace",
 }
 
 

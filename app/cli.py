@@ -52,6 +52,8 @@ def main(argv=None) -> int:
     ap.add_argument("--official", action="store_true", help="使用官方源（默认镜像加速）")
     ap.add_argument("--source", default="modrinth", choices=["modrinth", "curseforge"])
     ap.add_argument("--cf-key", default="", help="CurseForge API Key（留空用镜像）")
+    ap.add_argument("--on-conflict", default="", choices=["", "replace", "skip"],
+                    help="已存在同一模组时的处理：replace=替换（默认）/ skip=跳过")
     ap.add_argument("--quiet", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -131,7 +133,8 @@ def main(argv=None) -> int:
         prov = _provider(args, mr, cf, args.kind)
         files = _run_with_progress(
             lambda: installer.install_content(dl, prov, args.instance, args.kind, args.project,
-                                              args.version, not args.no_deps, args.world, log),
+                                              args.version, not args.no_deps, args.world, log,
+                                              args.on_conflict or None),
             dl, prog, log)
         print(json.dumps({"files": files}, ensure_ascii=False))
         print(f"耗时 {time.time() - t0:.1f}s")
@@ -149,7 +152,8 @@ def main(argv=None) -> int:
         log(f"整合包版本：{version_label(ver)}")
         info = _run_with_progress(
             lambda: installer.install_modpack(dl, mj, prov, args.instance, ver,
-                                              not args.no_auto_loader, log),
+                                              not args.no_auto_loader, log,
+                                              args.on_conflict or None),
             dl, prog, log)
         print(json.dumps(info, ensure_ascii=False))
         print(f"耗时 {time.time() - t0:.1f}s")

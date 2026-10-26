@@ -850,6 +850,13 @@ class SettingsTab(ttk.Frame):
         ttk.Label(grid, text="可选，留空使用国内镜像（无需 Key）",
                   foreground="#9aa").grid(row=3, column=2, sticky="w")
 
+        ttk.Label(grid, text="已有模组处理").grid(row=4, column=0, sticky="w", pady=4)
+        self.cb_conflict = ttk.Combobox(grid, width=18, state="readonly",
+                                        values=["替换旧版本", "跳过（保留已有）"])
+        self.cb_conflict.grid(row=4, column=1, sticky="w", padx=8)
+        ttk.Label(grid, text="按 jar 内 modId 识别同一模组（含整合包安装）",
+                  foreground="#9aa").grid(row=4, column=2, sticky="w")
+
         row2 = ttk.Frame(self)
         row2.pack(fill="x", pady=14)
         ttk.Button(row2, text="保存设置", style="Accent.TButton", command=self.save).pack(side="left")
@@ -871,6 +878,7 @@ class SettingsTab(ttk.Frame):
         self.var_mirror.set(bool(self.app.cfg.get("use_mirror", True)))
         self.e_cfkey.delete(0, "end")
         self.e_cfkey.insert(0, self.app.cfg.get("cf_api_key", ""))
+        self.cb_conflict.current(0 if self.app.cfg.get("on_conflict", "replace") == "replace" else 1)
 
     def add(self):
         d = filedialog.askdirectory(title="选择实例目录")
@@ -922,6 +930,7 @@ class SettingsTab(ttk.Frame):
         self.app.cfg["limit_kbps"] = limit
         self.app.cfg["use_mirror"] = bool(self.var_mirror.get())
         self.app.cfg["cf_api_key"] = self.e_cfkey.get().strip()
+        self.app.cfg["on_conflict"] = "replace" if self.cb_conflict.current() <= 0 else "skip"
         config.save_config(self.app.cfg)
         self.app._reload_engines()
         self.lbl_saved.configure(text=f"已保存（{time.strftime('%H:%M:%S')}）")
