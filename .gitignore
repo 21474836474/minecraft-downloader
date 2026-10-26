@@ -20,3 +20,8 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# ??????
+_*.ps1
+_shot.png
+

@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import ctypes
 from tkinter import filedialog, messagebox, ttk
 
 from . import config, installer, loaders
@@ -17,22 +18,79 @@ from .mojang import Mojang
 from .modrinth import LOADER_MAP, Modrinth, version_label
 from .net import Downloader, Progress, human_size
 
-BG = "#1e1f26"
-BG2 = "#272935"
-FG = "#e6e6e6"
-ACCENT = "#4aa3df"
-FONT = ("Microsoft YaHei UI", 9)
-FONT_B = ("Microsoft YaHei UI", 9, "bold")
-FONT_T = ("Microsoft YaHei UI", 14, "bold")
+BG = "#15171e"
+BG2 = "#1e212b"
+BG3 = "#2a2f3d"
+FG = "#e9edf5"
+MUTED = "#8b93a7"
+ACCENT = "#4da3ff"
+OK = "#7ee0b8"
+
+# 高 DPI：让窗口按物理像素渲染（否则 Windows 拉伸位图 → 模糊）
+SCALE = 1.0
+
+
+def enable_dpi() -> float:
+    """开启 per-monitor DPI 感知，返回缩放倍率。"""
+    global SCALE
+    if sys.platform != "win32":
+        SCALE = 1.0
+        return SCALE
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE_V2
+    except Exception:  # noqa: BLE001
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+    except Exception:  # noqa: BLE001
+        dpi = 96
+    SCALE = max(1.0, dpi / 96.0)
+    return SCALE
+
+
+def px(n: float) -> int:
+    """按系统缩放换算像素。"""
+    return max(1, int(round(n * SCALE)))
+
+
+FS = 10  # 基础字号（pt）
+FONT = ("Microsoft YaHei UI", FS)
+FONT_B = ("Microsoft YaHei UI", FS, "bold")
+FONT_S = ("Microsoft YaHei UI", FS - 1)
+FONT_T = ("Microsoft YaHei UI", FS + 5, "bold")
+
+
+def resource_path(name: str) -> str:
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, name)
+
+
+# 模块导入即开启 DPI 感知（必须在创建任何 Tk 窗口前）
+enable_dpi()
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Minecraft 下载器  ——  实例 / 模组 / 整合包 / 光影 / 材质 / 数据包")
-        self.geometry("1040x760")
-        self.minsize(920, 660)
+        try:
+            self.tk.call("tk", "scaling", 96 * SCALE / 72.0)
+        except tk.TclError:
+            pass
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(px(1200), sw - px(40)), min(px(800), sh - px(80))
+        self.geometry(f"{w}x{h}+{(sw - w) // 2}+{max(0, (sh - h) // 3)}")
+        self.minsize(min(px(980), sw - px(20)), min(px(700), sh - px(60)))
         self.configure(bg=BG)
+        try:
+            ico = resource_path("icon.ico")
+            if os.path.exists(ico):
+                self.iconbitmap(ico)
+        except tk.TclError:
+            pass
 
         self.cfg = config.load_config()
         self.mr: Modrinth | None = None
@@ -59,41 +117,58 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         style.configure(".", background=BG, foreground=FG, fieldbackground=BG2,
-                        font=FONT, bordercolor="#3a3d4d")
+                        font=FONT, bordercolor="#333846", focuscolor=ACCENT)
         style.configure("TFrame", background=BG)
         style.configure("TLabel", background=BG, foreground=FG)
         style.configure("TCheckbutton", background=BG, foreground=FG)
         style.configure("TRadiobutton", background=BG, foreground=FG)
-        style.configure("TButton", background="#3a3d4d", foreground=FG, padding=(10, 4))
-        style.map("TButton", background=[("active", ACCENT), ("disabled", "#2a2c36")],
-                  foreground=[("disabled", "#666")])
-        style.configure("Accent.TButton", background=ACCENT, foreground="#10202c",
-                        font=FONT_B, padding=(12, 5))
-        style.map("Accent.TButton", background=[("active", "#6cbcff")])
+        style.configure("TButton", background=BG3, foreground=FG,
+                        padding=(px(12), px(5)), borderwidth=0, focusthickness=0)
+        style.map("TButton",
+                  background=[("pressed", "#1b5f9c"), ("active", "#3b6ea8"), ("disabled", "#232733")],
+                  foreground=[("disabled", "#5b6272")])
+        style.configure("Accent.TButton", background=ACCENT, foreground="#0b1725",
+                        font=FONT_B, padding=(px(16), px(6)), borderwidth=0)
+        style.map("Accent.TButton",
+                  background=[("pressed", "#2f8be0"), ("active", "#7dc0ff")])
         style.configure("TNotebook", background=BG, borderwidth=0)
-        style.configure("TNotebook.Tab", background=BG2, foreground="#bbb",
-                        padding=(16, 7), font=FONT)
-        style.map("TNotebook.Tab", background=[("selected", BG)], foreground=[("selected", ACCENT)])
+        style.configure("TNotebook.Tab", background=BG2, foreground=MUTED,
+                        padding=(px(20), px(8)), font=FONT, borderwidth=0)
+        style.map("TNotebook.Tab",
+                  background=[("selected", BG)], foreground=[("selected", ACCENT)],
+                  expand=[("selected", (0, 0, 0, 0))])
         style.configure("Treeview", background=BG2, fieldbackground=BG2, foreground=FG,
-                        rowheight=24, borderwidth=0)
-        style.configure("Treeview.Heading", background="#33364a", foreground=FG, font=FONT_B)
-        style.map("Treeview", background=[("selected", "#2f5f86")])
-        style.configure("TEntry", fieldbackground=BG2, foreground=FG, insertcolor=FG)
-        style.configure("TCombobox", fieldbackground=BG2, foreground=FG, background=BG2)
+                        rowheight=px(28), borderwidth=0, font=FONT)
+        style.configure("Treeview.Heading", background="#2b3140", foreground=FG,
+                        font=FONT_B, padding=(px(8), px(6)), relief="flat")
+        style.map("Treeview.Heading", background=[("active", "#38404f")])
+        style.map("Treeview", background=[("selected", "#2b5f92")],
+                  foreground=[("selected", "#ffffff")])
+        style.configure("TEntry", fieldbackground=BG2, foreground=FG, insertcolor=FG,
+                        padding=px(4), borderwidth=1)
+        style.configure("TCombobox", fieldbackground=BG2, foreground=FG, background=BG3,
+                        arrowcolor=FG, padding=px(3), borderwidth=0)
+        style.map("TCombobox", fieldbackground=[("readonly", BG2)],
+                  selectbackground=[("readonly", BG2)], selectforeground=[("readonly", FG)])
+        style.configure("TSpinbox", fieldbackground=BG2, foreground=FG, arrowcolor=FG)
         style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor=BG2,
-                        bordercolor=BG2, lightcolor=ACCENT, darkcolor=ACCENT)
-        style.configure("TLabelframe", background=BG, foreground=ACCENT)
+                        bordercolor=BG2, lightcolor=ACCENT, darkcolor=ACCENT, thickness=px(8))
+        style.configure("TLabelframe", background=BG, foreground=ACCENT, borderwidth=1,
+                        relief="solid", bordercolor="#2b3140")
         style.configure("TLabelframe.Label", background=BG, foreground=ACCENT, font=FONT_B)
-        style.configure("TScrollbar", background=BG2, troughcolor=BG, arrowcolor=FG)
+        style.configure("TScrollbar", background=BG3, troughcolor=BG, arrowcolor=MUTED,
+                        borderwidth=0, width=px(12))
+        style.map("TScrollbar", background=[("active", "#3b4252")])
+        style.configure("TSeparator", background="#2b3140")
 
     def _build(self):
-        top = ttk.Frame(self, padding=(12, 10, 12, 4))
+        top = ttk.Frame(self, padding=(px(16), px(12), px(16), px(6)))
         top.pack(fill="x")
         ttk.Label(top, text="⚡ Minecraft 下载器", font=FONT_T, foreground=ACCENT).pack(side="left")
-        self.lbl_top = ttk.Label(top, text="", foreground="#9aa")
+        self.lbl_top = ttk.Label(top, text="", foreground=MUTED, font=FONT_S)
         self.lbl_top.pack(side="right")
 
-        bar = ttk.Frame(self, padding=(12, 0, 12, 6))
+        bar = ttk.Frame(self, padding=(px(16), 0, px(16), px(8)))
         bar.pack(fill="x")
         ttk.Label(bar, text="实例目录").pack(side="left")
         self.cb_dir = ttk.Combobox(bar, width=34, state="readonly", values=[])
@@ -115,7 +190,7 @@ class App(tk.Tk):
         self.cb_source.bind("<<ComboboxSelected>>", lambda e: self._on_source_change())
 
         self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        self.nb.pack(fill="both", expand=True, padx=px(16), pady=(0, px(8)))
         self.tab_game = GameTab(self.nb, self)
         self.tab_mod = ProjectTab(self.nb, self, "mod")
         self.tab_pack = ModpackTab(self.nb, self)
@@ -129,19 +204,20 @@ class App(tk.Tk):
                           (self.tab_set, "设置")):
             self.nb.add(tab, text=name)
 
-        status = ttk.Frame(self, padding=(12, 0, 12, 4))
+        status = ttk.Frame(self, padding=(px(16), 0, px(16), px(6)))
         status.pack(fill="x")
-        self.pb = ttk.Progressbar(status, mode="determinate", maximum=100, length=260)
+        self.pb = ttk.Progressbar(status, mode="determinate", maximum=100, length=px(300))
         self.pb.pack(side="left")
-        self.lbl_status = ttk.Label(status, text="就绪", foreground="#9aa")
-        self.lbl_status.pack(side="left", padx=10)
-        self.lbl_speed = ttk.Label(status, text="", foreground="#7fb")
+        self.lbl_status = ttk.Label(status, text="就绪", foreground=MUTED, font=FONT_S)
+        self.lbl_status.pack(side="left", padx=px(12))
+        self.lbl_speed = ttk.Label(status, text="", foreground=OK, font=FONT_S)
         self.lbl_speed.pack(side="right")
 
-        logf = ttk.LabelFrame(self, text="日志", padding=6)
-        logf.pack(fill="both", padx=12, pady=(0, 10))
-        self.log_box = tk.Text(logf, height=8, bg="#15161c", fg="#cfd6e4", insertbackground=FG,
-                               font=("Consolas", 9), relief="flat", wrap="none")
+        logf = ttk.LabelFrame(self, text=" 日志 ", padding=px(6))
+        logf.pack(fill="both", padx=px(16), pady=(0, px(12)))
+        self.log_box = tk.Text(logf, height=8, bg="#101218", fg="#cfd6e4", insertbackground=FG,
+                               font=("Consolas", FS - 1), relief="flat", wrap="none",
+                               padx=px(6), pady=px(4), borderwidth=0, highlightthickness=0)
         sb = ttk.Scrollbar(logf, orient="vertical", command=self.log_box.yview)
         self.log_box.configure(yscrollcommand=sb.set)
         self.log_box.pack(side="left", fill="both", expand=True)
@@ -305,7 +381,7 @@ class App(tk.Tk):
 
 class GameTab(ttk.Frame):
     def __init__(self, parent, app: App):
-        super().__init__(parent, padding=10)
+        super().__init__(parent, padding=px(12))
         self.app = app
         self.versions: list[dict] = []
         self.filtered: list[dict] = []
@@ -463,7 +539,7 @@ class ProjectTab(ttk.Frame):
     TITLES = {"mod": "模组", "shader": "光影包", "resourcepack": "材质包", "datapack": "数据包"}
 
     def __init__(self, parent, app: App, kind: str):
-        super().__init__(parent, padding=10)
+        super().__init__(parent, padding=px(12))
         self.app = app
         self.kind = kind
         self.hits: list[dict] = []
@@ -485,6 +561,8 @@ class ProjectTab(ttk.Frame):
         for c, t, w in (("title", "名称", 240), ("dl", "下载量", 90), ("desc", "简介", 520)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="w", stretch=(c == "desc"))
+        self.tree.tag_configure("odd", background=BG2)
+        self.tree.tag_configure("even", background="#242938")
         self.tree.pack(fill="both", expand=True, pady=8)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.load_versions())
 
@@ -530,9 +608,9 @@ class ProjectTab(ttk.Frame):
     def show(self, hits: list[dict]):
         self.hits = hits
         self.tree.delete(*self.tree.get_children())
-        for h in hits:
+        for i, h in enumerate(hits):
             desc = (h.get("description") or "").replace("\n", " ")[:120]
-            self.tree.insert("", "end", iid=h["project_id"],
+            self.tree.insert("", "end", iid=h["project_id"], tags=("odd" if i % 2 else "even",),
                              values=(h.get("title"), f"{h.get('downloads', 0):,}", desc))
         self.lbl_info.configure(text=f"共 {len(hits)} 个结果")
 
@@ -612,7 +690,7 @@ class ProjectTab(ttk.Frame):
 
 class ModpackTab(ttk.Frame):
     def __init__(self, parent, app: App):
-        super().__init__(parent, padding=10)
+        super().__init__(parent, padding=px(12))
         self.app = app
         self.hits: list[dict] = []
         self.versions: list[dict] = []
@@ -630,6 +708,8 @@ class ModpackTab(ttk.Frame):
         for c, t, w in (("title", "名称", 240), ("dl", "下载量", 90), ("desc", "简介", 520)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="w", stretch=(c == "desc"))
+        self.tree.tag_configure("odd", background=BG2)
+        self.tree.tag_configure("even", background="#242938")
         self.tree.pack(fill="both", expand=True, pady=8)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.load_versions())
 
@@ -664,8 +744,8 @@ class ModpackTab(ttk.Frame):
     def show(self, hits):
         self.hits = hits
         self.tree.delete(*self.tree.get_children())
-        for h in hits:
-            self.tree.insert("", "end", iid=h["project_id"],
+        for i, h in enumerate(hits):
+            self.tree.insert("", "end", iid=h["project_id"], tags=("odd" if i % 2 else "even",),
                              values=(h.get("title"), f"{h.get('downloads', 0):,}",
                                      (h.get("description") or "")[:120]))
 
@@ -728,7 +808,7 @@ class ModpackTab(ttk.Frame):
 
 class SettingsTab(ttk.Frame):
     def __init__(self, parent, app: App):
-        super().__init__(parent, padding=14)
+        super().__init__(parent, padding=px(16))
         self.app = app
         ttk.Label(self, text="实例目录", font=FONT_B, foreground=ACCENT).pack(anchor="w")
         ttk.Label(self, text="添加后，目录下的每个子文件夹都会被视为一个游戏实例。",
@@ -851,5 +931,6 @@ class SettingsTab(ttk.Frame):
 
 
 def run():
+    enable_dpi()
     app = App()
     app.mainloop()

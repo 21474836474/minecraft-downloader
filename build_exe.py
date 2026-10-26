@@ -20,6 +20,7 @@ def main():
         "--noconfirm", "--clean", "--onefile", "--windowed",
         "--name", NAME,
         "--icon", os.path.join(HERE, "icon.ico"),
+        "--add-data", os.path.join(HERE, "icon.ico") + os.pathsep + ".",
         "--collect-submodules", "app",
         "--exclude-module", "numpy",
         "--exclude-module", "PIL.ImageTk",
